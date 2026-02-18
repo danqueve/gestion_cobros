@@ -1,289 +1,382 @@
 <?php
-// --- LÓGICA DE LA VISTA DE RUTAS CON LÓGICA DE PAGO AVANZADA (ACTUALIZADA) ---
+// --- LÓGICA DE LA VISTA DE RUTAS CON LÓGICA CENTRALIZADA (OPTIMIZADA) ---
 
+// 1. Procesamiento de Pagos
 $error = '';
 $success = '';
 
-// --- MAPA DE NOMBRES PARA LAS ZONAS ---
-$nombres_zonas = [
-    1 => 'Santi',
-    2 => 'Juan Pablo',
-    3 => 'Enzo',
-    4 => 'Tafi del V',
-    5 => 'Famailla',
-    6 => 'Sgo'
-];
-
-// --- PROCESAR REGISTRO DE PAGO ---
 if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['registrar_pago'])) {
-    
     $credito_id = $_POST['credito_id'];
     $fecha_pago_str = $_POST['fecha_pago'] ?? date('Y-m-d');
     if(empty($fecha_pago_str)) $fecha_pago_str = date('Y-m-d');
     $monto_cobrado = filter_input(INPUT_POST, 'monto_cobrado', FILTER_VALIDATE_FLOAT);
 
-    if (empty($monto_cobrado) || $monto_cobrado <= 0) {
-        $error = "Debe ingresar un monto válido para registrar el pago.";
-    } else {
-        try {
-            $pdo->beginTransaction();
-
-            // 1. Registrar el pago en la tabla 'pagos'
-            $sql_pago = "INSERT INTO pagos (credito_id, usuario_id, monto_pagado, fecha_pago) VALUES (?, ?, ?, ?)";
-            $stmt_pago = $pdo->prepare($sql_pago);
-            $stmt_pago->execute([$credito_id, $_SESSION['user_id'], $monto_cobrado, $fecha_pago_str]);
-            
-            // 2. Aplicar el monto cobrado a las cuotas del cronograma
-            $monto_restante_pago = $monto_cobrado;
-
-            $sql_cuotas = "SELECT * FROM cronograma_cuotas WHERE credito_id = ? AND estado IN ('Pendiente', 'Pago Parcial') ORDER BY numero_cuota ASC";
-            $stmt_cuotas = $pdo->prepare($sql_cuotas);
-            $stmt_cuotas->execute([$credito_id]);
-
-            while ($monto_restante_pago > 0 && ($cuota = $stmt_cuotas->fetch(PDO::FETCH_ASSOC))) {
-                $faltante_cuota = $cuota['monto_cuota'] - $cuota['monto_pagado'];
-
-                if (bccomp($monto_restante_pago, $faltante_cuota, 2) >= 0) {
-                    $monto_a_imputar = $faltante_cuota;
-                    $nuevo_estado_cuota = 'Pagado';
-                } else {
-                    $monto_a_imputar = $monto_restante_pago;
-                    $nuevo_estado_cuota = 'Pago Parcial';
-                }
-
-                $sql_update_cuota = "UPDATE cronograma_cuotas SET monto_pagado = monto_pagado + ?, estado = ? WHERE id = ?";
-                $stmt_update_cuota = $pdo->prepare($sql_update_cuota);
-                $stmt_update_cuota->execute([$monto_a_imputar, $nuevo_estado_cuota, $cuota['id']]);
-
-                $monto_restante_pago -= $monto_a_imputar;
-            }
-
-            // 3. Recalcular y actualizar el estado general del crédito principal
-            $sql_count_pagadas = "SELECT COUNT(id) FROM cronograma_cuotas WHERE credito_id = ? AND estado = 'Pagado'";
-            $stmt_count_pagadas = $pdo->prepare($sql_count_pagadas);
-            $stmt_count_pagadas->execute([$credito_id]);
-            $total_cuotas_pagadas = $stmt_count_pagadas->fetchColumn();
-            
-            $stmt_total = $pdo->prepare("SELECT total_cuotas FROM creditos WHERE id = ?");
-            $stmt_total->execute([$credito_id]);
-            $total_cuotas_credito = $stmt_total->fetchColumn();
-
-            $nuevo_estado_credito = ($total_cuotas_pagadas >= $total_cuotas_credito) ? 'Pagado' : 'Activo';
-
-            $sql_update_credito = "UPDATE creditos SET cuotas_pagadas = ?, ultimo_pago = ?, estado = ? WHERE id = ?";
-            $stmt_update_credito = $pdo->prepare($sql_update_credito);
-            $stmt_update_credito->execute([$total_cuotas_pagadas, $fecha_pago_str, $nuevo_estado_credito, $credito_id]);
-
-            $pdo->commit();
-            $success = "¡Pago Cargado y aplicado al cronograma!";
-
-        } catch (PDOException $e) {
-            $pdo->rollBack();
-            $error = "Error al registrar el pago: " . $e->getMessage();
+    try {
+        if (registrarPago($pdo, $credito_id, $monto_cobrado, $_SESSION['user_id'], $fecha_pago_str)) {
+            $success = "¡Pago registrado correctamente!";
         }
+    } catch (Exception $e) {
+        $error = "Error al registrar: " . $e->getMessage();
     }
 }
 
-
-// --- LÓGICA DE FILTRADO (ACTUALIZADA) ---
-$zona_seleccionada = $_GET['zona'] ?? 1; // Zona 1 por defecto
+// 2. Filtros
+$zona_seleccionada = $_GET['zona'] ?? 1;
 $dia_seleccionado = $_GET['dia'] ?? 'Lunes';
-$dias_semana = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
 
-// --- CONSTRUCCIÓN DINÁMICA DE LA CONSULTA (CORREGIDA) ---
-// AHORA FILTRA SOLO POR cr.estado = 'Activo'
-$sql = "SELECT c.nombre, cr.* FROM creditos cr 
-        JOIN clientes c ON cr.cliente_id = c.id 
-        WHERE cr.zona = ? AND cr.estado = 'Activo'"; 
-$params = [$zona_seleccionada];
-
-// --- CAMBIO REALIZADO AQUÍ ---
-// Si la zona NO es 4, 5 ni 6, se aplica el filtro por día.
-// Usamos !in_array para verificar si la zona actual NO está en la lista de excepciones.
-if (!in_array($zona_seleccionada, [4, 5, 6])) {
-    // Muestra los clientes Semanales del día, y TODOS los Quincenales/Mensuales.
-    $sql .= " AND ( (cr.frecuencia = 'Semanal' AND cr.dia_pago = ?) OR (cr.frecuencia IN ('Quincenal', 'Mensual')) )";
-    $params[] = $dia_seleccionado;
+// --- NUEVO: VERIFICACIÓN DE PERMISOS ---
+// Si el usuario intenta acceder a una zona que no tiene permitida, lo redirigimos o mostramos error.
+// (Excepto si zona_seleccionada es 'all' y filtramos en la query, pero aquí parece que siempre se selecciona una zona específica)
+if (!tienePermisoZona($zona_seleccionada)) {
+    // Si no tiene permiso, intentamos asignarle la primera zona que sí tenga permitida
+    if (!esAdmin() && !empty($_SESSION['zonas_asignadas'])) {
+        $zonas_permitidas = explode(',', $_SESSION['zonas_asignadas']);
+        $zona_seleccionada = $zonas_permitidas[0]; // Forzar la primera zona válida
+    } else {
+        // Si no tiene zonas o es admin (y algo falló), default a 1
+        $zona_seleccionada = 1; 
+    }
 }
 
-$sql .= " ORDER BY c.nombre ASC"; 
+// 3. Consulta Optimizada
+try {
+    $sql = "SELECT 
+                c.id AS cliente_id,
+                c.nombre, 
+                cr.id AS credito_id,
+                cr.monto_cuota,
+                cr.total_cuotas,
+                cr.cuotas_pagadas,
+                cr.frecuencia,
+                MIN(cc.fecha_vencimiento) as proximo_vencimiento,
+                SUM(cc.monto_cuota - cc.monto_pagado) as saldo_total_pendiente,
+                (
+                    SELECT (cc2.monto_cuota - cc2.monto_pagado) 
+                    FROM cronograma_cuotas cc2 
+                    WHERE cc2.credito_id = cr.id AND cc2.estado != 'Pagado' 
+                    ORDER BY cc2.fecha_vencimiento ASC, cc2.numero_cuota ASC 
+                    LIMIT 1
+                ) as saldo_cuota_pendiente
+            FROM creditos cr 
+            JOIN clientes c ON cr.cliente_id = c.id 
+            JOIN cronograma_cuotas cc ON cr.id = cc.credito_id
+            WHERE cr.zona = ? 
+              AND cr.estado = 'Activo'
+              AND cc.estado != 'Pagado'";
 
-$stmt = $pdo->prepare($sql);
-$stmt->execute($params);
-$clientes_filtrados = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    // Aplicar Filtro de Permisos (Redundancia de seguridad)
+    // Aunque ya forzamos $zona_seleccionada arriba, esto asegura que la query nunca traiga datos prohibidos
+    $sql .= getFiltroZonasSQL('cr.zona');
 
-$cobranza_estimada = 0;
-foreach ($clientes_filtrados as $cliente) {
-    // La cobranza estimada ya solo incluirá clientes activos gracias al filtro SQL
-    $stmt_prox_cuota = $pdo->prepare("SELECT (monto_cuota - monto_pagado) as saldo FROM cronograma_cuotas WHERE credito_id = ? AND estado IN ('Pendiente', 'Pago Parcial') ORDER BY numero_cuota ASC LIMIT 1");
-    $stmt_prox_cuota->execute([$cliente['id']]);
-    $saldo_cuota = $stmt_prox_cuota->fetchColumn();
-    $cobranza_estimada += $saldo_cuota ?: $cliente['monto_cuota'];
+    $params = [$zona_seleccionada];
+
+    // Filtro por Día
+    // CORRECCIÓN: He eliminado la condición `if (!in_array($zona_seleccionada, [4, 5, 6]))`
+    // Ahora el filtro de día se aplica SIEMPRE, permitiendo elegir día para cualquier zona.
+    // Si realmente esas zonas NO deben tener filtro de día, puedes descomentar la línea de abajo.
+    // if (!in_array($zona_seleccionada, [4, 5, 6])) { 
+        $sql .= " AND ( (cr.frecuencia = 'Semanal' AND cr.dia_pago = ?) OR (cr.frecuencia IN ('Quincenal', 'Mensual')) )";
+        $params[] = $dia_seleccionado;
+    // }
+
+    $sql .= " GROUP BY cr.id ORDER BY c.nombre ASC";
+
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    $clientes_filtrados = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+} catch (PDOException $e) {
+    echo "<div class='bg-red-500 text-white p-4 rounded'>Error BD: " . $e->getMessage() . "</div>";
+    $clientes_filtrados = [];
+}
+
+// 4. Cálculos para Summary Cards (Por Frecuencia)
+$total_semanal = 0;
+$total_quincenal = 0;
+$total_mensual = 0;
+
+foreach ($clientes_filtrados as $c) {
+    // Se cobra lo que diga el saldo de la cuota pendiente, 
+    // o el monto de cuota regular si por error no vino el dato
+    $monto = $c['saldo_cuota_pendiente'] ?? $c['monto_cuota'];
+    
+    // Sumar según frecuencia
+    // Normalizamos a minúsculas por si acaso, aunque en BD suelen estar Capitalizadas (Semanal, Quincenal, Mensual)
+    $freq = strtolower($c['frecuencia']);
+    
+    if ($freq === 'semanal') {
+        $total_semanal += $monto;
+    } elseif ($freq === 'quincenal') {
+        $total_quincenal += $monto;
+    } elseif ($freq === 'mensual') {
+        $total_mensual += $monto;
+    }
 }
 ?>
 
-<!-- MENSAJES DE ÉXITO O ERROR -->
-<?php if(!empty($error)): ?>
-    <div class="bg-red-900 border border-red-700 text-red-200 px-4 py-3 rounded-md mb-4" role="alert"><?= htmlspecialchars($error) ?></div>
-<?php endif; ?>
-
-<!-- FORMULARIO DE FILTROS Y BOTÓN DE IMPRESIÓN -->
-<div class="bg-gray-800 p-4 rounded-lg shadow-md mb-6 border border-gray-700 flex flex-col sm:flex-row justify-between items-center gap-4 no-print">
-    <form method="GET" action="index.php" class="flex flex-col sm:flex-row items-center gap-4">
-        <input type="hidden" name="page" value="rutas">
-        <div>
-            <label for="zona" class="block text-sm font-medium text-gray-300">Zona:</label>
-            <select id="zona" name="zona" class="mt-1 block w-full pl-3 pr-10 py-2 text-base rounded-md form-element-dark">
-                <?php foreach($nombres_zonas as $num => $nombre): ?>
-                    <option value="<?= $num ?>" <?= $zona_seleccionada == $num ? 'selected' : '' ?>><?= htmlspecialchars($nombre) ?></option>
-                <?php endforeach; ?>
-            </select>
-        </div>
-        
-        <?php 
-        // Ocultar selector de día también para zonas 4, 5 y 6
-        if(!in_array($zona_seleccionada, [4, 5, 6])): 
-        ?>
-        <div>
-            <label for="dia" class="block text-sm font-medium text-gray-300">Día:</label>
-            <select id="dia" name="dia" class="mt-1 block w-full pl-3 pr-10 py-2 text-base rounded-md form-element-dark">
-                <?php foreach ($dias_semana as $d): ?>
-                    <option value="<?= $d ?>" <?= $dia_seleccionado == $d ? 'selected' : '' ?>><?= $d ?></option>
-                <?php endforeach; ?>
-            </select>
-        </div>
-        <?php endif; ?>
-
-        <button type="submit" class="w-full sm:w-auto mt-4 sm:mt-0 self-end bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md"><i class="fas fa-filter"></i> Filtrar</button>
-    </form>
-    
-    <?php 
-        $print_link = "views/imprimir_planilla.php?zona=" . $zona_seleccionada;
-        // Solo agregar el parámetro día si NO es zona 4, 5 o 6
-        if (!in_array($zona_seleccionada, [4, 5, 6])) {
-            $print_link .= "&dia=" . urlencode($dia_seleccionado);
-        }
-    ?>
-    <a href="<?= $print_link ?>" target="_blank" class="w-full sm:w-auto bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-md text-center">
-        <i class="fas fa-print mr-2"></i>Imprimir Planilla
-    </a>
-</div>
-
-
-<!-- TARJETAS DE RESUMEN -->
-<div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8 no-print">
-    <div class="summary-card"><h3 class="text-lg font-medium text-gray-400">Cobranza Estimada</h3><p id="total-estimado" data-valor="<?= $cobranza_estimada ?>" class="text-3xl font-bold text-gray-100 mt-2">$0</p></div>
-    <div class="summary-card"><h3 class="text-lg font-medium text-gray-400">Total Cobrado</h3><p id="total-cobrado" class="text-3xl font-bold text-green-400 mt-2">$0</p></div>
-    <div class="summary-card"><h3 class="text-lg font-medium text-gray-400">Faltante</h3><p id="total-faltante" class="text-3xl font-bold text-red-400 mt-2">$0</p></div>
-</div>
-
-<!-- TABLA DE COBROS -->
-<div class="overflow-x-auto rounded-lg shadow border border-gray-700">
-    <table class="min-w-full divide-y divide-gray-700">
-        <thead class="table-header-custom">
-             <tr>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Cliente</th>
-                <th class="px-4 py-3 text-center text-xs font-medium text-gray-300 uppercase tracking-wider">Cuotas</th>
-                <th class="px-4 py-3 text-center text-xs font-medium text-gray-300 uppercase tracking-wider">Venc. Cuota</th>
-                <th class="px-4 py-3 text-right text-xs font-medium text-gray-300 uppercase tracking-wider">Saldo Cuota</th>
-                <th class="px-4 py-3 text-right text-xs font-medium text-gray-300 uppercase tracking-wider">Saldo Total</th>
-                <th class="px-4 py-3 text-right text-xs font-medium text-gray-300 uppercase tracking-wider">Cuota</th>
-                <th class="px-4 py-3 text-center text-xs font-medium text-gray-300 uppercase tracking-wider">Días Atraso</th>
-                <th class="px-4 py-3 text-center text-xs font-medium text-gray-300 uppercase tracking-wider no-print">Acciones de Cobro</th>
-            </tr>
-        </thead>
-        <tbody class="divide-y divide-gray-700">
-            <?php if (empty($clientes_filtrados)): ?>
-                <tr><td colspan="8" class="px-6 py-12 text-center text-gray-400 table-row-dark"><i class="fas fa-folder-open fa-3x mb-3"></i><p>No hay clientes para esta ruta.</p></td></tr>
-            <?php else: ?>
-                <?php foreach ($clientes_filtrados as $cliente): ?>
-                    <?php
-                    // La lógica de cálculo de saldos y atraso sigue igual
-                    $dias_atraso_display = 0;
-                    $estado_atraso_display = 'Al día'; // Por defecto, si no debe nada o está pagado
-                    $saldo_pendiente_cuota = 0;
-                    $saldo_total_credito = 0;
-                    $proximo_vencimiento_str = null;
-
-                    // Solo recalculamos si el estado es 'Activo'
-                    // (Aunque ya filtramos por 'Activo' en el SQL principal, mantenemos la robustez)
-                    if ($cliente['estado'] == 'Activo') {
-                        $stmt_saldos = $pdo->prepare("
-                            SELECT (monto_cuota - monto_pagado) as saldo_cuota_actual,
-                                   (SELECT SUM(monto_cuota - monto_pagado) FROM cronograma_cuotas WHERE credito_id = :id1 AND estado IN ('Pendiente', 'Pago Parcial')) as saldo_total,
-                                   fecha_vencimiento
-                            FROM cronograma_cuotas 
-                            WHERE credito_id = :id2 AND estado IN ('Pendiente', 'Pago Parcial') 
-                            ORDER BY numero_cuota ASC LIMIT 1");
-                        $stmt_saldos->execute([':id1' => $cliente['id'], ':id2' => $cliente['id']]);
-                        $saldos_y_vencimiento = $stmt_saldos->fetch(PDO::FETCH_ASSOC);
-
-                        $saldo_pendiente_cuota = $saldos_y_vencimiento['saldo_cuota_actual'] ?? 0;
-                        $saldo_total_credito = $saldos_y_vencimiento['saldo_total'] ?? 0;
-                        $proximo_vencimiento_str = $saldos_y_vencimiento['fecha_vencimiento'] ?? null;
-
-                        if ($proximo_vencimiento_str) {
-                            $hoy = new DateTime();
-                            $proximo_vencimiento = new DateTime($proximo_vencimiento_str);
-                            if ($hoy > $proximo_vencimiento) {
-                                $diferencia = $hoy->diff($proximo_vencimiento);
-                                $dias_atraso_display = $diferencia->days;
-                                $estado_atraso_display = 'Atrasado';
-                            }
-                        }
-                    }
-                    ?>
-                    <tr class="table-row-dark">
-                        <td class="px-4 py-4 whitespace-nowrap">
-                            <a href="index.php?page=editar_cliente&id=<?= $cliente['id'] ?>" class="font-medium text-blue-400 hover:underline">
-                                <?= htmlspecialchars($cliente['nombre']) ?>
-                            </a>
-                        </td>
-                        <td class="px-4 py-4 whitespace-nowrap text-center text-gray-300"><?= $cliente['cuotas_pagadas'] ?> / <?= $cliente['total_cuotas'] ?></td>
-                        <td class="px-4 py-4 whitespace-nowrap text-center text-gray-300 font-semibold"><?= $proximo_vencimiento_str ? (new DateTime($proximo_vencimiento_str))->format('d/m/Y') : 'N/A' ?></td>
-                        <td class="px-4 py-4 whitespace-nowrap text-right font-semibold text-yellow-400"><?= formatCurrency($saldo_pendiente_cuota) ?></td>
-                        <td class="px-4 py-4 whitespace-nowrap text-right font-semibold text-blue-400"><?= formatCurrency($saldo_total_credito) ?></td>
-                        <td class="px-4 py-4 whitespace-nowrap text-right text-gray-300"><?= formatCurrency($cliente['monto_cuota']) ?></td>
-                        <td class="px-4 py-4 whitespace-nowrap text-center">
-                            <?php if ($estado_atraso_display == 'Atrasado'): ?><span class="late-payment"><?= $dias_atraso_display ?> días</span>
-                            <?php else: ?><span class="on-time">Al día</span><?php endif; ?>
-                        </td>
-                        <td class="px-4 py-4 whitespace-nowrap no-print">
-                            <form action="index.php?page=rutas&zona=<?= $zona_seleccionada ?><?= (!in_array($zona_seleccionada, [4, 5, 6]) ? '&dia='.urlencode($dia_seleccionado) : '') ?>" method="POST" class="flex items-center gap-2 justify-center">
-                                <input type="hidden" name="credito_id" value="<?= $cliente['id'] ?>">
-                                <input type="date" name="fecha_pago" class="w-32 rounded-md shadow-sm form-element-dark" title="Fecha de Pago" value="<?= date('Y-m-d') ?>">
-                                <input type="number" step="0.01" name="monto_cobrado" class="monto-cobrado-input w-32 rounded-md shadow-sm form-element-dark" placeholder="<?= number_format($saldo_pendiente_cuota, 2, '.', '') ?>" autocomplete="off">
-                                <button type="submit" name="registrar_pago" class="bg-green-600 hover:bg-green-700 text-white font-bold py-1 px-3 rounded-md text-sm transition duration-300">
-                                    <i class="fas fa-check"></i> Registrar
-                                </button>
-                            </form>
-                        </td>
-                    </tr>
-                <?php endforeach; ?>
-            <?php endif; ?>
-        </tbody>
-    </table>
-</div>
-
-<!-- POPUP DE NOTIFICACIÓN DE ÉXITO -->
-<div id="success-popup" class="hidden fixed bottom-5 right-5 bg-green-600 text-white py-3 px-5 rounded-lg shadow-lg flex items-center">
-    <i class="fas fa-check-circle mr-3"></i>
-    <span id="popup-message"></span>
-</div>
-
-<!-- SCRIPT PARA MANEJAR EL POPUP -->
-<?php if(!empty($success)): ?>
+<!-- SweetAlert2 Injection -->
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+<?php if($success): ?>
 <script>
-    document.addEventListener('DOMContentLoaded', function() {
-        const popup = document.getElementById('success-popup');
-        const messageEl = document.getElementById('popup-message');
-        if (popup && messageEl) {
-            messageEl.textContent = "<?= htmlspecialchars($success) ?>";
-            popup.classList.remove('hidden');
-            setTimeout(() => {
-                popup.classList.add('hidden');
-            }, 3000);
-        }
+    document.addEventListener('DOMContentLoaded', () => {
+        Swal.fire({
+            icon: 'success',
+            title: '¡Excelente!',
+            text: '<?= addslashes($success) ?>',
+            timer: 2000,
+            showConfirmButton: false,
+            background: '#1f2937',
+            color: '#fff'
+        });
     });
 </script>
 <?php endif; ?>
+<?php if($error): ?>
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        Swal.fire({
+            icon: 'error',
+            title: 'Oops...',
+            text: '<?= addslashes($error) ?>',
+            background: '#1f2937',
+            color: '#fff'
+        });
+    });
+</script>
+<?php endif; ?>
+
+
+<!-- CONTENIDO PRINCIPAL -->
+<div class="max-w-7xl mx-auto space-y-6">
+    
+    <!-- Header y Filtros -->
+    <div class="bg-gray-800 p-6 rounded-xl shadow-lg border border-gray-700 flex flex-col lg:flex-row justify-between items-center gap-6 no-print">
+        <div class="flex-1 w-full lg:w-auto">
+            <h2 class="text-2xl font-bold text-white tracking-tight flex items-center gap-2">
+                <i class="fas fa-route text-blue-500"></i> Rutas de Cobro
+            </h2>
+            <p class="text-gray-400 text-sm mt-1">Administra la cobranza diaria por zona.</p>
+        </div>
+
+        <form method="GET" action="index.php" class="flex flex-col sm:flex-row items-end gap-4 w-full lg:w-auto">
+            <input type="hidden" name="page" value="rutas">
+            
+            <div class="w-full sm:w-40">
+                <label for="zona" class="block text-xs font-semibold text-gray-400 mb-1 uppercase">Zona</label>
+                <div class="relative">
+                    <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                        <i class="fas fa-map-marker-alt text-gray-500"></i>
+                    </div>
+                    <select id="zona" name="zona" onchange="this.form.submit()" class="block w-full pl-10 pr-10 py-2 bg-gray-700 border-gray-600 text-white text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 appearance-none">
+                        <?php foreach($NOMBRES_ZONAS as $num => $nombre): ?>
+                            <?php 
+                            // Mostrar solo las zonas permitidas en el select
+                            if(tienePermisoZona($num)): 
+                            ?>
+                                <option value="<?= $num ?>" <?= $zona_seleccionada == $num ? 'selected' : '' ?>><?= htmlspecialchars($nombre) ?></option>
+                            <?php endif; ?>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+            </div>
+            
+            <!-- Selector de Día (Ahora visible siempre para todas las zonas) -->
+            <div class="w-full sm:w-40">
+                <label for="dia" class="block text-xs font-semibold text-gray-400 mb-1 uppercase">Día</label>
+                <div class="relative">
+                    <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                        <i class="fas fa-calendar-day text-gray-500"></i>
+                    </div>
+                    <select id="dia" name="dia" class="block w-full pl-10 pr-10 py-2 bg-gray-700 border-gray-600 text-white text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 appearance-none">
+                        <?php foreach ($DIAS_SEMANA as $d): ?>
+                            <option value="<?= $d ?>" <?= $dia_seleccionado == $d ? 'selected' : '' ?>><?= $d ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+            </div>
+
+            <button type="submit" class="w-full sm:w-auto bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-6 rounded-lg shadow-md transition-all flex items-center justify-center gap-2 h-[38px]">
+                <i class="fas fa-filter"></i> Filtrar
+            </button>
+        </form>
+        
+        <?php 
+            $print_link = "views/imprimir_planilla.php?zona=" . $zona_seleccionada . "&dia=" . urlencode($dia_seleccionado);
+        ?>
+        <a href="<?= $print_link ?>" target="_blank" class="w-full lg:w-auto bg-gray-700 hover:bg-gray-600 text-white font-medium py-2 px-6 rounded-lg border border-gray-600 transition-colors flex items-center justify-center gap-2 shadow-sm h-[38px]">
+            <i class="fas fa-print"></i> Planilla
+        </a>
+    </div>
+
+    <!-- Stats Cards (MODIFICADO: Semanal, Quincenal, Mensual) -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 no-print">
+        <!-- Semanal (Antes: Estimado) -->
+        <div class="bg-gradient-to-br from-gray-800 to-gray-900 p-6 rounded-xl border border-gray-700 shadow-lg relative overflow-hidden group">
+            <div class="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
+                <i class="fas fa-calendar-week fa-4x text-blue-400"></i>
+            </div>
+            <p class="text-sm font-medium text-blue-400 uppercase tracking-wider mb-1">Semanal</p>
+            <h3 class="text-3xl font-extrabold text-white"><?= formatCurrency($total_semanal) ?></h3>
+            <div class="mt-4 h-1 w-full bg-gray-700 rounded-full overflow-hidden">
+                <div class="h-full bg-blue-500 w-full opacity-75"></div>
+            </div>
+        </div>
+
+        <!-- Quincenales (Antes: Cobrado Hoy) -->
+        <div class="bg-gradient-to-br from-gray-800 to-gray-900 p-6 rounded-xl border border-gray-700 shadow-lg relative overflow-hidden group">
+            <div class="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
+                <i class="fas fa-calendar-check fa-4x text-orange-400"></i>
+            </div>
+            <p class="text-sm font-medium text-orange-400 uppercase tracking-wider mb-1">Quincenales</p>
+            <h3 class="text-3xl font-extrabold text-white"><?= formatCurrency($total_quincenal) ?></h3>
+            <div class="mt-4 h-1 w-full bg-gray-700 rounded-full overflow-hidden">
+                <div class="h-full bg-orange-500 w-full opacity-75"></div>
+            </div>
+        </div>
+
+        <!-- Mensuales (Antes: Faltante) -->
+        <div class="bg-gradient-to-br from-gray-800 to-gray-900 p-6 rounded-xl border border-gray-700 shadow-lg relative overflow-hidden group">
+            <div class="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
+                <i class="fas fa-calendar-alt fa-4x text-purple-400"></i>
+            </div>
+            <p class="text-sm font-medium text-purple-400 uppercase tracking-wider mb-1">Mensuales</p>
+            <h3 class="text-3xl font-extrabold text-white"><?= formatCurrency($total_mensual) ?></h3>
+             <div class="mt-4 h-1 w-full bg-gray-700 rounded-full overflow-hidden">
+                <div class="h-full bg-purple-500 w-full opacity-75"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Table -->
+    <div class="bg-gray-800 rounded-xl shadow-2xl border border-gray-700 overflow-hidden">
+        <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse">
+                <thead>
+                    <tr class="bg-gray-900/50 text-gray-400 text-xs uppercase tracking-wider border-b border-gray-700">
+                        <th class="px-6 py-4 font-medium">Cliente</th>
+                        <th class="px-6 py-4 font-medium text-center">Progreso</th>
+                        <th class="px-6 py-4 font-medium text-center">Vencimiento</th>
+                        <th class="px-6 py-4 font-medium text-right">Saldo Cuota</th>
+                        <th class="px-6 py-4 font-medium text-right">Deuda Total</th>
+                        <th class="px-6 py-4 font-medium text-right">Valor Cuota</th>
+                        <th class="px-6 py-4 font-medium text-center">Estado</th>
+                        <th class="px-6 py-4 font-medium text-center no-print">Acción Rápida</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-700 text-gray-300">
+                    <?php if (empty($clientes_filtrados)): ?>
+                        <tr>
+                            <td colspan="8" class="px-6 py-16 text-center text-gray-500">
+                                <div class="flex flex-col items-center justify-center">
+                                    <div class="bg-gray-700/50 p-4 rounded-full mb-3">
+                                        <i class="fas fa-clipboard-check text-green-500 text-3xl"></i>
+                                    </div>
+                                    <p class="text-lg font-medium text-gray-300">Ruta Completada</p>
+                                    <p class="text-sm">No hay cobros pendientes para los filtros seleccionados.</p>
+                                </div>
+                            </td>
+                        </tr>
+                    <?php else: ?>
+                        <?php foreach ($clientes_filtrados as $cliente): 
+                            // Lógica de estado local (para visualización rápida)
+                            $dias_atraso = 0;
+                            $es_atrasado = false;
+                            if ($cliente['proximo_vencimiento']) {
+                                $venc = new DateTime($cliente['proximo_vencimiento']);
+                                $hoy = new DateTime();
+                                if ($hoy > $venc) {
+                                    $es_atrasado = true;
+                                    $dias_atraso = $hoy->diff($venc)->days;
+                                }
+                            }
+                        ?>
+                        <tr class="hover:bg-gray-700/50 transition-colors group">
+                            <!-- Cliente -->
+                            <td class="px-6 py-4">
+                                <div class="flex items-center">
+                                    <div class="flex-shrink-0 h-10 w-10 rounded-full bg-gray-700 flex items-center justify-center text-indigo-400 font-bold border border-gray-600 shadow-sm">
+                                        <?= strtoupper(substr($cliente['nombre'], 0, 1)) ?>
+                                    </div>
+                                    <div class="ml-4">
+                                        <div class="text-white font-medium group-hover:text-blue-400 transition-colors">
+                                            <?= htmlspecialchars($cliente['nombre']) ?>
+                                        </div>
+                                        <div class="text-xs text-gray-500">ID: <?= $cliente['credito_id'] ?></div>
+                                    </div>
+                                </div>
+                            </td>
+                            
+                            <!-- Progreso -->
+                            <td class="px-6 py-4 text-center">
+                                <div class="inline-flex items-center justify-center px-2.5 py-0.5 rounded-full bg-gray-700 text-xs font-medium text-gray-300 border border-gray-600">
+                                    <?= $cliente['cuotas_pagadas'] ?> / <?= $cliente['total_cuotas'] ?>
+                                </div>
+                            </td>
+
+                            <!-- Vencimiento -->
+                            <td class="px-6 py-4 text-center text-sm">
+                                <?= $cliente['proximo_vencimiento'] ? (new DateTime($cliente['proximo_vencimiento']))->format('d/m/Y') : '<span class="text-gray-600">-</span>' ?>
+                            </td>
+
+                            <!-- Saldo Cuota -->
+                            <td class="px-6 py-4 text-right">
+                                <span class="text-yellow-400 font-bold text-sm">
+                                    <?= formatCurrency($cliente['saldo_cuota_pendiente'] ?? 0) ?>
+                                </span>
+                            </td>
+
+                            <!-- Deuda Total -->
+                            <td class="px-6 py-4 text-right text-sm text-blue-300">
+                                <?= formatCurrency($cliente['saldo_total_pendiente'] ?? 0) ?>
+                            </td>
+                            
+                            <!-- Valor Cuota -->
+                            <td class="px-6 py-4 text-right text-sm text-gray-400">
+                                <?= formatCurrency($cliente['monto_cuota']) ?>
+                            </td>
+
+                            <!-- Estado -->
+                            <td class="px-6 py-4 text-center">
+                                <?php if ($es_atrasado): ?>
+                                    <span class="px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-900/50 text-red-200 border border-red-800">
+                                        <?= $dias_atraso ?> días atraso
+                                    </span>
+                                <?php else: ?>
+                                    <span class="px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-900/50 text-green-200 border border-green-800">
+                                        Al día
+                                    </span>
+                                <?php endif; ?>
+                            </td>
+
+                            <!-- Acción Rápida -->
+                            <td class="px-6 py-4 text-center no-print">
+                                <form action="index.php?page=rutas&zona=<?= $zona_seleccionada ?>&dia=<?= urlencode($dia_seleccionado) ?>" method="POST" class="flex items-center justify-center gap-2">
+                                    <input type="hidden" name="credito_id" value="<?= $cliente['credito_id'] ?>"> <!-- USAR ID DE CREDITO, NO CLIENTE -->
+                                    
+                                    <div class="relative">
+                                        <div class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none">
+                                            <span class="text-gray-500 text-xs">$</span>
+                                        </div>
+                                        <input type="number" step="0.01" name="monto_cobrado" 
+                                               class="block w-24 pl-5 pr-2 py-1.5 bg-gray-700 border-gray-600 text-white rounded-md text-sm placeholder-gray-500 focus:ring-blue-500 focus:border-blue-500 transition-all" 
+                                               placeholder="<?= number_format($cliente['saldo_cuota_pendiente'] ?? 0, 2, '.', '') ?>" 
+                                               autocomplete="off">
+                                    </div>
+
+                                    <button type="submit" name="registrar_pago" class="bg-green-600 hover:bg-green-700 text-white p-1.5 rounded-md shadow transition-colors" title="Cobrar">
+                                        <i class="fas fa-check"></i>
+                                    </button>
+                                    
+                                    <a href="index.php?page=editar_cliente&id=<?= $cliente['credito_id'] ?>" class="bg-gray-700 hover:bg-gray-600 text-blue-400 p-1.5 rounded-md shadow transition-colors" title="Ver Detalle">
+                                        <i class="fas fa-eye"></i>
+                                    </a>
+                                </form>
+                            </td>
+                        </tr>
+                        <?php endforeach; ?>
+                    <?php endif; ?>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
