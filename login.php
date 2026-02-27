@@ -18,9 +18,9 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         $error = "Por favor ingrese usuario y contraseña.";
     } else {
         try {
-            // CORRECCIÓN: Usamos 'nombre_usuario' en la cláusula WHERE y seleccionamos los campos correctos
-            // Buscamos por nombre_usuario, pero traemos nombre_completo para mostrarlo
-            $sql = "SELECT id, nombre_usuario, nombre_completo, password, rol, zonas_asignadas FROM usuarios WHERE nombre_usuario = ?";
+            // CORRECCIÓN: Eliminamos 'rol' y 'zonas_asignadas' de la consulta
+            // Solo seleccionamos los campos que realmente existen en tu tabla actual
+            $sql = "SELECT id, nombre_usuario, nombre_completo, password FROM usuarios WHERE nombre_usuario = ?";
             $stmt = $pdo->prepare($sql);
             $stmt->execute([$username]);
             $user = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -32,9 +32,8 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
                 // Usamos nombre_completo para mostrar "Hola, Juan", si no existe usamos el usuario
                 $_SESSION['user_nombre'] = !empty($user['nombre_completo']) ? $user['nombre_completo'] : $user['nombre_usuario'];
                 
-                // Guardamos Rol y Zonas para el sistema de permisos
-                $_SESSION['rol'] = $user['rol'] ?? 'cobrador'; 
-                $_SESSION['zonas_asignadas'] = $user['zonas_asignadas'] ?? '';
+                // NOTA: Como no hay roles en la BD, no guardamos $_SESSION['rol'].
+                // El archivo config.php ya se ajustó para asumir que todos tienen permiso total (esAdmin() devuelve true).
 
                 // Regenerar ID de sesión por seguridad
                 session_regenerate_id(true);
@@ -48,8 +47,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         } catch (PDOException $e) {
             // En producción, es mejor loguear el error y mostrar un mensaje genérico
             error_log("Login Error: " . $e->getMessage());
-            // Mostramos el error técnico solo si es necesario depurar (puedes cambiarlo por un mensaje genérico luego)
-            $error = "Error de base de datos: " . $e->getMessage();
+            $error = "Error de base de datos. Intente más tarde.";
         }
     }
 }

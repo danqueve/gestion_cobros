@@ -32,7 +32,8 @@ $allowed_pages = [
     'eliminar_cliente',
     'atrasados',
     'reporte_general',
-    'finalizados' // <-- CORRECCIÓN: Se ha añadido la página 'finalizados'
+    'finalizados',
+    'log_pagos',  // historial de pagos
 ];
 
 // 6. Cargar la vista correspondiente.

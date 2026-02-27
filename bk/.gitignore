@@ -1,0 +1,21 @@
+# === SEGURIDAD: Archivos con credenciales ===
+config.php
+
+# === Base de datos ===
+*.sql
+/bk/
+
+# === Sistema Operativo ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === IDEs / Editores ===
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# === Logs ===
+*.log
+/logs/

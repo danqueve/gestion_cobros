@@ -1,287 +1,373 @@
 <?php
-// --- LÓGICA DE LA VISTA DE CLIENTES ATRASADOS (ACTUALIZADA) ---
+// --- LÓGICA DE LA VISTA DE CLIENTES ATRASADOS (OPTIMIZADA) ---
 
+// 1. Configuración y Filtros
 $zona_seleccionada = $_GET['zona'] ?? 'all';
+$limit_options = [10, 20, 50, 100];
+$limit = isset($_GET['limit']) && in_array((int)$_GET['limit'], $limit_options) ? (int)$_GET['limit'] : 10;
+$page = isset($_GET['p']) && (int)$_GET['p'] > 0 ? (int)$_GET['p'] : 1;
+$offset = ($page - 1) * $limit;
 
-// --- MAPA DE NOMBRES PARA LAS ZONAS ---
-$nombres_zonas =[
-    1 => 'Santi',
-    2 => 'Juan Pablo',
+// Nombres de las zonas (idealmente esto vendría de una tabla base de datos o constante global)
+$nombres_zonas = [
+    1 => 'Santi', 
+    2 => 'Juan Pablo', 
     3 => 'Enzo',
-    4 => 'Tafi del V',
-    5 => 'Famailla',
+    4 => 'Tafi del V', 
+    5 => 'Famailla', 
     6 => 'Sgo'
 ];
 
-// --- LÓGICA DE ORDENAMIENTO (se añade 'saldo_cuota') ---
-$sort_options = ['nombre', 'zona', 'ultimo_pago', 'dias_atraso', 'frecuencia', 'dia_cobro', 'monto_cuota', 'vencimiento_cuota', 'saldo_cuota'];
-$sort_by = isset($_GET['sort_by']) && in_array($_GET['sort_by'], $sort_options) ? $_GET['sort_by'] : 'dias_atraso';
-$sort_order = isset($_GET['sort_order']) && in_array(strtoupper($_GET['sort_order']), ['ASC', 'DESC']) ? strtoupper($_GET['sort_order']) : 'ASC';
-
-// --- LÓGICA DE PAGINACIÓN ---
-$limit_options = [10, 15, 25, 30];
-$limit = isset($_GET['limit']) && in_array($_GET['limit'], $limit_options) ? (int)$_GET['limit'] : 10;
-$page_num = isset($_GET['p']) && $_GET['p'] > 0 ? (int)$_GET['p'] : 1;
-$offset = ($page_num - 1) * $limit;
-
 try {
-    // --- CONSULTA PARA OBTENER LOS CLIENTES ATRASADOS (CON SALDO) ---
-    $sql_base = "SELECT c.nombre, c.telefono, cr.zona, cr.ultimo_pago, cr.frecuencia, cr.monto_cuota,
-                   CASE 
-                        WHEN cr.frecuencia = 'Semanal' THEN cr.dia_pago 
-                        ELSE cr.dia_vencimiento 
-                   END AS dia_cobro,
-                   (SELECT MIN(fecha_vencimiento) FROM cronograma_cuotas cc WHERE cc.credito_id = cr.id AND cc.estado IN ('Pendiente', 'Pago Parcial')) as vencimiento_cuota,
-                   DATEDIFF(CURDATE(), (SELECT MIN(fecha_vencimiento) FROM cronograma_cuotas cc WHERE cc.credito_id = cr.id AND cc.estado IN ('Pendiente', 'Pago Parcial'))) AS dias_atraso,
-                   (SELECT (monto_cuota - monto_pagado) FROM cronograma_cuotas cc WHERE cc.credito_id = cr.id AND cc.estado IN ('Pendiente', 'Pago Parcial') ORDER BY cc.numero_cuota ASC LIMIT 1) as saldo_cuota
-            FROM creditos cr
-            JOIN clientes c ON cr.cliente_id = c.id
-            WHERE cr.estado = 'Activo'";
-
+    // 2. Construcción de la Consulta Optimizada
+    // Usamos JOIN y GROUP BY para filtrar y agregar en una sola pasada.
+    // Buscamos cuotas vencidas (fecha_vencimiento < HOY y estado != Pagado)
+    
+    $where_zona = "";
     $params = [];
-    if ($zona_seleccionada != 'all') {
-        $sql_base .= " AND cr.zona = :zona";
+    
+    if ($zona_seleccionada !== 'all') {
+        $where_zona = "AND cr.zona = :zona";
         $params[':zona'] = $zona_seleccionada;
     }
+
+    // --- LOGICA EXPORTACION PDF (JSON) ---
+    if (isset($_GET['export']) && $_GET['export'] === 'pdf_data') {
+        // Misma query pero SIN limit/offset
+        $sql_all = "SELECT 
+                    c.nombre,
+                    c.telefono,
+                    cr.ultimo_pago,
+                    cr.monto_cuota,
+                    SUM(cc.monto_cuota - cc.monto_pagado) AS total_vencido,
+                    COUNT(cc.id) AS cant_cuotas_vencidas,
+                    DATEDIFF(CURDATE(), MIN(cc.fecha_vencimiento)) AS dias_atraso
+                FROM creditos cr
+                JOIN clientes c ON cr.cliente_id = c.id
+                JOIN cronograma_cuotas cc ON cr.id = cc.credito_id
+                WHERE cr.estado = 'Activo' 
+                  AND cc.estado != 'Pagado' 
+                  AND cc.fecha_vencimiento < CURDATE()
+                  $where_zona
+                GROUP BY cr.id
+                ORDER BY total_vencido DESC";
+        
+        $stmt_all = $pdo->prepare($sql_all);
+        $stmt_all->execute($params);
+        $data = $stmt_all->fetchAll(PDO::FETCH_ASSOC);
+        
+        // Deolver JSON y terminar script
+        ob_clean(); // Limpiar buffer por si acaso
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['data' => $data, 'zona' => $nombres_zonas[$zona_seleccionada] ?? 'Todas']);
+        exit;
+    }
+    // --------------------------------------
+
+    // Consulta para contar total de registros (para paginación)
+    $sql_count = "SELECT COUNT(DISTINCT cr.id) 
+                  FROM creditos cr
+                  JOIN cronograma_cuotas cc ON cr.id = cc.credito_id
+                  WHERE cr.estado = 'Activo' 
+                    AND cc.estado != 'Pagado' 
+                    AND cc.fecha_vencimiento < CURDATE()
+                    $where_zona";
     
-    $sql_base .= " HAVING vencimiento_cuota IS NOT NULL AND dias_atraso > 0";
-    
-    // --- CONSULTA PARA CONTAR ---
-    $sql_count = "SELECT COUNT(*) FROM ({$sql_base}) AS subquery";
     $stmt_count = $pdo->prepare($sql_count);
     $stmt_count->execute($params);
     $total_records = $stmt_count->fetchColumn();
     $total_pages = ceil($total_records / $limit);
 
-    // --- CONSULTA PARA LA VISTA WEB Y PDF ---
-    $sql_final = $sql_base . " ORDER BY $sort_by $sort_order";
-    
-    $stmt_pdf = $pdo->prepare($sql_final);
-    $stmt_pdf->execute($params);
-    $atrasados_pdf = $stmt_pdf->fetchAll(PDO::FETCH_ASSOC);
+    // Consulta Principal (Paginada)
+    // Obtenemos: Datos Cliente, Total Vencido, Días del vencimiento más antiguo, Cantidad de cuotas vencidas
+    $sql = "SELECT 
+                c.id AS cliente_id,
+                c.nombre,
+                c.telefono,
+                cr.id AS credito_id,
+                cr.zona,
+                cr.monto_cuota,
+                cr.ultimo_pago,
+                MIN(cc.fecha_vencimiento) AS fecha_vencimiento_antigua,
+                SUM(cc.monto_cuota - cc.monto_pagado) AS total_vencido,
+                COUNT(cc.id) AS cant_cuotas_vencidas,
+                DATEDIFF(CURDATE(), MIN(cc.fecha_vencimiento)) AS dias_atraso
+            FROM creditos cr
+            JOIN clientes c ON cr.cliente_id = c.id
+            JOIN cronograma_cuotas cc ON cr.id = cc.credito_id
+            WHERE cr.estado = 'Activo' 
+              AND cc.estado != 'Pagado' 
+              AND cc.fecha_vencimiento < CURDATE()
+              $where_zona
+            GROUP BY cr.id
+            ORDER BY total_vencido DESC
+            LIMIT :limit OFFSET :offset";
 
-    $sql_final .= " LIMIT :limit OFFSET :offset";
-    $stmt = $pdo->prepare($sql_final);
-    
-    if ($zona_seleccionada != 'all') {
-        $stmt->bindValue(':zona', $params[':zona'], PDO::PARAM_INT);
+    $stmt = $pdo->prepare($sql);
+    if ($zona_seleccionada !== 'all') {
+        $stmt->bindValue(':zona', $zona_seleccionada, PDO::PARAM_INT);
     }
     $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
     $stmt->bindValue(':offset', $offset, PDO::PARAM_INT);
-    
     $stmt->execute();
     $atrasados = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 } catch (PDOException $e) {
-    die("Error al obtener los clientes atrasados: " . $e->getMessage());
+    die("Error en la base de datos: " . $e->getMessage());
 }
 
-// Función para generar los enlaces de ordenamiento
-function sort_link($column, $text, $current_sort, $current_order) {
-    $order = ($current_sort == $column && $current_order == 'ASC') ? 'DESC' : 'ASC';
-    $icon = '';
-    if ($current_sort == $column) {
-        $icon = $current_order == 'ASC' ? '<i class="fas fa-arrow-up ml-1"></i>' : '<i class="fas fa-arrow-down ml-1"></i>';
-    }
-    $limit_param = isset($_GET['limit']) ? "&limit=" . $_GET['limit'] : "";
-    $zona_param = isset($_GET['zona']) ? "&zona=" . $_GET['zona'] : "";
-    return "<a href='?page=atrasados&sort_by=$column&sort_order=$order$limit_param$zona_param'>$text $icon</a>";
-}
+// 3. Helpers para UI
+$title_text = ($zona_seleccionada !== 'all' && isset($nombres_zonas[$zona_seleccionada]))
+            ? "Atrasados - " . htmlspecialchars($nombres_zonas[$zona_seleccionada])
+            : "Listado General de Atrasados";
 
-// Lógica para el título dinámico
-$title_text = "Listado General de Atrasados";
-if ($zona_seleccionada != 'all' && isset($nombres_zonas[$zona_seleccionada])) {
-    $title_text = "Listado de Atrasados - " . htmlspecialchars($nombres_zonas[$zona_seleccionada]);
+function getSeverityClass($dias) {
+    if ($dias > 30) return 'bg-red-900/50 text-red-200 border-red-700'; // Crítico
+    if ($dias > 7)  return 'bg-orange-900/50 text-orange-200 border-orange-700'; // Moderado
+    return 'bg-yellow-900/50 text-yellow-200 border-yellow-700'; // Leve
 }
-
-// Obtener datos para el PDF
-$nombre_cobrador = $_SESSION['user_nombre'] ?? 'Usuario';
-date_default_timezone_set('America/Argentina/Buenos_Aires');
-$fecha_impresion = date('d/m/Y H:i:s');
 ?>
-<!-- Inclusión de las librerías para generar PDF -->
+
+<!-- Librerías para PDF -->
 <script src="https://unpkg.com/jspdf@latest/dist/jspdf.umd.min.js"></script>
 <script src="https://unpkg.com/jspdf-autotable@latest/dist/jspdf.plugin.autotable.js"></script>
 
-<!-- ESTILOS Y MEJORAS VISUALES -->
-<style>
-    .row-even { background-color: #2d3748; }
-    .row-odd { background-color: rgba(55, 65, 81, 0.5); }
-    tbody tr:hover { background-color: #4a5568; }
-</style>
-
-<div class="print-area">
-    <h2 class="text-2xl font-bold text-gray-200 mb-4 print-title"><?= $title_text ?></h2>
-
-    <div class="bg-gray-800 p-6 rounded-lg border border-gray-700 print-container">
-        <!-- Controles de Filtro y Exportación -->
-        <div class="flex flex-col sm:flex-row justify-between items-center mb-4 gap-4 no-print">
-            <form action="index.php" method="GET" class="flex items-center gap-4">
+<div class="max-w-7xl mx-auto">
+    <!-- Encabezado y Acciones -->
+    <div class="flex flex-col md:flex-row md:items-center md:justify-between mb-6 gap-4">
+        <div>
+            <h2 class="text-3xl font-bold text-white tracking-tight"><?= $title_text ?></h2>
+            <p class="text-gray-400 mt-1">
+                <i class="fas fa-exclamation-circle text-red-500 mr-1"></i>
+                Se encontraron <span class="text-white font-bold"><?= $total_records ?></span> créditos con cuotas vencidas.
+            </p>
+        </div>
+        <div class="flex flex-col sm:flex-row gap-3">
+             <form action="index.php" method="GET" class="flex items-center gap-2 bg-gray-800 p-2 rounded-lg border border-gray-700">
                 <input type="hidden" name="page" value="atrasados">
-                <label for="zona" class="text-sm font-medium text-gray-300">Filtrar por Zona:</label>
-                <select name="zona" id="zona" onchange="this.form.submit()" class="text-sm rounded-md form-element-dark">
-                    <option value="all" <?= $zona_seleccionada == 'all' ? 'selected' : '' ?>>Todas las Zonas</option>
-                    <?php foreach($nombres_zonas as $num => $nombre): ?>
+                <i class="fas fa-filter text-gray-400 ml-2"></i>
+                <select name="zona" onchange="this.form.submit()" class="bg-transparent text-white text-sm focus:outline-none border-none py-1">
+                    <option value="all" <?= $zona_seleccionada === 'all' ? 'selected' : '' ?>>Todas las Zonas</option>
+                    <?php foreach ($nombres_zonas as $num => $nombre): ?>
                         <option value="<?= $num ?>" <?= $zona_seleccionada == $num ? 'selected' : '' ?>><?= htmlspecialchars($nombre) ?></option>
                     <?php endforeach; ?>
                 </select>
             </form>
-            <button type="button" id="export-pdf-btn" class="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-md">
-                <i class="fas fa-file-pdf mr-2"></i>Exportar a PDF
+            <button type="button" id="export-pdf-btn" class="bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition-colors flex items-center justify-center">
+                <i class="fas fa-file-pdf mr-2"></i> PDF
             </button>
         </div>
-        
-        <!-- Controles de Paginación -->
-        <div class="flex flex-col sm:flex-row justify-between items-center mb-4 gap-4 no-print">
-            <div class="text-sm text-gray-400">
-                <?php
-                    $start_item = ($total_records > 0) ? $offset + 1 : 0;
-                    $end_item = min($offset + $limit, $total_records);
-                    if ($total_records > 0) {
-                        echo "Mostrando $start_item a $end_item de $total_records clientes atrasados";
-                    }
-                ?>
-            </div>
-            <form action="index.php" method="GET" class="flex items-center gap-2">
-                <input type="hidden" name="page" value="atrasados">
-                <input type="hidden" name="zona" value="<?= htmlspecialchars($zona_seleccionada) ?>">
-                <label for="limit" class="text-sm text-gray-400">Mostrar:</label>
-                <select name="limit" id="limit" onchange="this.form.submit()" class="text-sm rounded-md form-element-dark">
-                    <?php foreach($limit_options as $option): ?>
-                        <option value="<?= $option ?>" <?= $limit == $option ? 'selected' : '' ?>><?= $option ?></option>
-                    <?php endforeach; ?>
-                </select>
-            </form>
-        </div>
+    </div>
 
-        <!-- Tabla de Clientes Atrasados -->
-        <div class="overflow-x-auto no-print">
-            <table class="min-w-full divide-y divide-gray-700">
-                <thead class="table-header-custom">
-                    <tr>
-                        <th class="px-2 py-3 text-center text-xs font-medium text-gray-300 uppercase tracking-wider">#</th>
-                        <th class="px-4 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider"><?= sort_link('nombre', 'Cliente', $sort_by, $sort_order) ?></th>
-                        <th class="px-4 py-3 text-center text-xs font-medium text-gray-300 uppercase tracking-wider"><?= sort_link('saldo_cuota', 'Saldo Cuota', $sort_by, $sort_order) ?></th>
-                        <th class="px-4 py-3 text-center text-xs font-medium text-gray-300 uppercase tracking-wider"><?= sort_link('monto_cuota', 'Monto Cuota', $sort_by, $sort_order) ?></th>
-                        <th class="px-4 py-3 text-center text-xs font-medium text-gray-300 uppercase tracking-wider"><?= sort_link('vencimiento_cuota', 'Venc. Cuota', $sort_by, $sort_order) ?></th>
-                        <th class="px-4 py-3 text-center text-xs font-medium text-gray-300 uppercase tracking-wider"><?= sort_link('dias_atraso', 'Días de Atraso', $sort_by, $sort_order) ?></th>
-                        <th class="px-4 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Teléfono</th>
+    <!-- Tabla de Atrasados -->
+    <div class="bg-gray-800 rounded-xl shadow-2xl border border-gray-700 overflow-hidden">
+        <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse">
+                <thead>
+                    <tr class="bg-gray-900/50 text-gray-400 text-sm uppercase tracking-wider border-b border-gray-700">
+                        <th class="px-6 py-4 font-medium text-center">#</th>
+                        <th class="px-6 py-4 font-medium">Cliente</th>
+                        <th class="px-6 py-4 font-medium text-center">Deuda Total</th>
+                        <th class="px-6 py-4 font-medium text-center">Cuotas Venc.</th>
+                        <th class="px-6 py-4 font-medium text-center">Antigüedad</th>
+                        <th class="px-6 py-4 font-medium text-center">Ult. Pago</th>
+                        <th class="px-6 py-4 font-medium text-center">Zona</th>
+                        <th class="px-6 py-4 font-medium text-center">Acciones</th>
                     </tr>
                 </thead>
-                <tbody class="divide-y divide-gray-700">
+                <tbody class="divide-y divide-gray-700 text-gray-300">
                     <?php if (empty($atrasados)): ?>
-                        <tr><td colspan="7" class="px-6 py-12 text-center text-gray-400"><i class="fas fa-check-circle fa-3x mb-3 text-green-500"></i><p>¡Excelente! No hay clientes con atrasos.</p></td></tr>
+                        <tr>
+                            <td colspan="8" class="px-6 py-16 text-center text-gray-500">
+                                <div class="flex flex-col items-center">
+                                    <div class="bg-gray-700/50 p-4 rounded-full mb-3">
+                                        <i class="fas fa-check text-green-500 text-3xl"></i>
+                                    </div>
+                                    <p class="text-lg font-medium text-gray-300">¡Al día!</p>
+                                    <p class="text-sm">No hay clientes con pagos atrasados en este momento.</p>
+                                </div>
+                            </td>
+                        </tr>
                     <?php else: ?>
-                        <?php foreach (array_values($atrasados) as $index => $cliente): ?>
-                        <tr class="<?= ($index % 2 == 0) ? 'row-even' : 'row-odd' ?>">
-                            <td class="px-2 py-3 whitespace-nowrap text-center text-gray-300"><?= $offset + $index + 1 ?></td>
-                            <td class="px-4 py-3 whitespace-nowrap font-medium text-gray-100"><?= htmlspecialchars($cliente['nombre']) ?></td>
-                            <td class="px-4 py-3 whitespace-nowrap text-center text-yellow-400 font-semibold"><?= formatCurrency($cliente['saldo_cuota']) ?></td>
-                            <td class="px-4 py-3 whitespace-nowrap text-center text-gray-300 font-semibold"><?= formatCurrency($cliente['monto_cuota']) ?></td>
-                            <td class="px-4 py-3 whitespace-nowrap text-center text-gray-300 font-semibold"><?= $cliente['vencimiento_cuota'] ? (new DateTime($cliente['vencimiento_cuota']))->format('d/m/Y') : 'N/A' ?></td>
-                            <td class="px-4 py-3 whitespace-nowrap text-center font-bold text-red-500"><?= $cliente['dias_atraso'] ?> días</td>
-                            <td class="px-4 py-3 whitespace-nowrap text-gray-300"><?= htmlspecialchars($cliente['telefono'] ?? 'N/A') ?></td>
+                        <?php foreach ($atrasados as $i => $row): 
+                            $badgeClass = getSeverityClass($row['dias_atraso']);
+                            $wa_link = "https://wa.me/" . preg_replace('/[^0-9]/', '', '549' . $row['telefono']); // Asumiendo código país 549
+                        ?>
+                        <tr class="hover:bg-gray-700/30 transition-colors group">
+                            <td class="px-6 py-4 text-center font-mono text-sm text-gray-500">
+                                <?= $offset + $i + 1 ?>
+                            </td>
+                            <td class="px-6 py-4">
+                                <div class="flex items-center">
+                                    <div class="flex-shrink-0 h-10 w-10 rounded-full bg-gray-700 flex items-center justify-center text-indigo-400 font-bold border border-gray-600">
+                                        <?= strtoupper(substr($row['nombre'], 0, 1)) ?>
+                                    </div>
+                                    <div class="ml-4">
+                                        <div class="text-white font-medium group-hover:text-blue-400 transition-colors">
+                                            <?= htmlspecialchars($row['nombre']) ?>
+                                        </div>
+                                        <div class="text-sm text-gray-500 flex items-center gap-1">
+                                            <i class="fas fa-phone-alt text-xs"></i> <?= htmlspecialchars($row['telefono'] ?: 'Sin tel.') ?>
+                                        </div>
+                                    </div>
+                                </div>
+                            </td>
+                            <td class="px-6 py-4 text-center">
+                                <span class="bg-red-900/30 text-red-300 px-3 py-1 rounded-full text-sm font-bold border border-red-900/50">
+                                    <?= formatCurrency($row['total_vencido']) ?>
+                                </span>
+                            </td>
+                             <td class="px-6 py-4 text-center">
+                                <span class="text-gray-300 font-medium"><?= $row['cant_cuotas_vencidas'] ?></span>
+                                <span class="text-xs text-gray-500 block">($<?= formatCurrency($row['monto_cuota']) ?> c/u)</span>
+                            </td>
+                            <td class="px-6 py-4 text-center">
+                                <div class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border <?= $badgeClass ?>">
+                                    <i class="fas fa-clock mr-1"></i> <?= $row['dias_atraso'] ?> días
+                                </div>
+                                <div class="text-xs text-gray-500 mt-1">
+                                    Desde <?= date('d/m', strtotime($row['fecha_vencimiento_antigua'])) ?>
+                                </div>
+                            </td>
+                            <td class="px-6 py-4 text-center text-sm text-gray-400">
+                                <?= $row['ultimo_pago'] ? date('d/m/Y', strtotime($row['ultimo_pago'])) : '-' ?>
+                            </td>
+                            <td class="px-6 py-4 text-center text-sm">
+                                <?= $nombres_zonas[$row['zona']] ?? $row['zona'] ?>
+                            </td>
+                            <td class="px-6 py-4 text-center space-x-2">
+                                <?php if($row['telefono']): ?>
+                                <a href="<?= $wa_link ?>" target="_blank" class="text-green-500 hover:text-green-400 transition-colors bg-gray-700 hover:bg-gray-600 p-2 rounded-lg inline-flex" title="Enviar WhatsApp">
+                                    <i class="fab fa-whatsapp fa-lg"></i>
+                                </a>
+                                <?php endif; ?>
+                                <a href="index.php?page=editar_cliente&id=<?= $row['credito_id'] ?>" class="text-blue-500 hover:text-blue-400 transition-colors bg-gray-700 hover:bg-gray-600 p-2 rounded-lg inline-flex" title="Ver Detalles">
+                                    <i class="fas fa-arrow-right fa-lg"></i>
+                                </a>
+                            </td>
                         </tr>
                         <?php endforeach; ?>
                     <?php endif; ?>
                 </tbody>
             </table>
         </div>
-
-        <!-- Navegación de Paginación -->
-        <?php if($total_pages > 1): ?>
-        <div class="mt-6 flex justify-center items-center gap-2 no-print">
-             <a href="?page=atrasados&p=<?= $page_num - 1 ?>&limit=<?= $limit ?>&zona=<?= $zona_seleccionada ?>&sort_by=<?= $sort_by ?>&sort_order=<?= $sort_order ?>" class="<?= $page_num <= 1 ? 'pointer-events-none text-gray-600' : 'text-blue-400 hover:text-blue-300' ?>"><i class="fas fa-chevron-left"></i> Anterior</a>
-             <div class="flex gap-2">
-                <?php for ($i = 1; $i <= $total_pages; $i++): ?>
-                    <a href="?page=atrasados&p=<?= $i ?>&limit=<?= $limit ?>&zona=<?= $zona_seleccionada ?>&sort_by=<?= $sort_by ?>&sort_order=<?= $sort_order ?>" class="px-3 py-1 rounded-md <?= $i == $page_num ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600' ?>"><?= $i ?></a>
+        
+        <!-- Paginación Footer -->
+        <div class="bg-gray-900/50 px-6 py-4 border-t border-gray-700 flex flex-col sm:flex-row items-center justify-between gap-4">
+            <span class="text-sm text-gray-400">
+                Mostrando <?= $offset + 1 ?> a <?= min($offset + $limit, $total_records) ?> de <?= $total_records ?>
+            </span>
+            
+            <?php if ($total_pages > 1): ?>
+            <div class="flex items-center gap-2">
+                <!-- Anterior -->
+                <a href="?page=atrasados&p=<?= max(1, $page-1) ?>&limit=<?= $limit ?>&zona=<?= $zona_seleccionada ?>" 
+                   class="px-3 py-1 rounded-md bg-gray-700 text-gray-300 hover:bg-gray-600 hover:text-white transition-colors <?= $page <= 1 ? 'opacity-50 pointer-events-none' : '' ?>">
+                    <i class="fas fa-chevron-left"></i>
+                </a>
+                
+                <!-- Números Paginación Simple -->
+                <?php
+                $start = max(1, $page - 2);
+                $end = min($total_pages, $page + 2);
+                for ($i = $start; $i <= $end; $i++): 
+                ?>
+                <a href="?page=atrasados&p=<?= $i ?>&limit=<?= $limit ?>&zona=<?= $zona_seleccionada ?>" 
+                   class="px-3 py-1 rounded-md text-sm font-medium transition-colors <?= $i == $page ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600' ?>">
+                    <?= $i ?>
+                </a>
                 <?php endfor; ?>
+                
+                <!-- Siguiente -->
+                <a href="?page=atrasados&p=<?= min($total_pages, $page+1) ?>&limit=<?= $limit ?>&zona=<?= $zona_seleccionada ?>" 
+                   class="px-3 py-1 rounded-md bg-gray-700 text-gray-300 hover:bg-gray-600 hover:text-white transition-colors <?= $page >= $total_pages ? 'opacity-50 pointer-events-none' : '' ?>">
+                    <i class="fas fa-chevron-right"></i>
+                </a>
             </div>
-            <a href="?page=atrasados&p=<?= $page_num + 1 ?>&limit=<?= $limit ?>&zona=<?= $zona_seleccionada ?>&sort_by=<?= $sort_by ?>&sort_order=<?= $sort_order ?>" class="<?= $page_num >= $total_pages ? 'pointer-events-none text-gray-600' : 'text-blue-400 hover:text-blue-300' ?>">Siguiente <i class="fas fa-chevron-right"></i></a>
+            <?php endif; ?>
         </div>
-        <?php endif; ?>
     </div>
 </div>
 
+<!-- Lógica JS para PDF -->
 <script>
-document.addEventListener('DOMContentLoaded', function() {
-    document.getElementById('export-pdf-btn').addEventListener('click', function() {
-        try {
-            const { jsPDF } = window.jspdf;
-            const doc = new jsPDF({
-                orientation: 'portrait',
-                unit: 'mm',
-                format: 'a4'
-            });
+document.addEventListener('DOMContentLoaded', function () {
+    const btnExport = document.getElementById('export-pdf-btn');
+    const nombresZonas = <?= json_encode($nombres_zonas) ?>;
+    const zonaActual = "<?= $zona_seleccionada ?>";
+    
+    if(btnExport) {
+        btnExport.addEventListener('click', function () {
+            // 1. Mostrar estado de carga y Fetch datos completos
+            const originalText = btnExport.innerHTML;
+            btnExport.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i> Generando...';
+            btnExport.disabled = true;
 
-            const title = "<?= addslashes($title_text) ?>";
-            const cobrador = "Cobrador: <?= addslashes($nombre_cobrador) ?>";
-            const fecha = "Fecha de Impresión: <?= addslashes($fecha_impresion) ?>";
-            
-            const head = [['#', 'Cliente', 'Teléfono', 'Día Cobro', 'Venc.', 'Saldo', 'Frec.', 'Cuota', 'Ult. Pago', 'Atraso']];
-            const body = <?= json_encode(array_map(function($cliente, $index) {
-                return [
-                    $index + 1,
-                    $cliente['nombre'],
-                    $cliente['telefono'] ?? 'N/A',
-                    $cliente['dia_cobro'],
-                    $cliente['vencimiento_cuota'] ? (new DateTime($cliente['vencimiento_cuota']))->format('d/m/Y') : 'N/A',
-                    formatCurrency($cliente['saldo_cuota']),
-                    $cliente['frecuencia'],
-                    formatCurrency($cliente['monto_cuota']),
-                    $cliente['ultimo_pago'] ? (new DateTime($cliente['ultimo_pago']))->format('d/m/Y') : 'N/A',
-                    $cliente['dias_atraso'] . ' días'
-                ];
-            }, $atrasados_pdf, array_keys($atrasados_pdf)), JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_UNESCAPED_UNICODE) ?>;
+            fetch(`index.php?page=atrasados&export=pdf_data&zona=${zonaActual}`)
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                    return response.text().then(text => {
+                         try {
+                             return JSON.parse(text);
+                         } catch (e) {
+                             console.error("Respuesta no válida del servidor:", text);
+                             throw new Error("El servidor devolvió datos inválidos (no JSON).");
+                         }
+                    });
+                })
+                .then(res => {
+                    const data = res.data;
+                    const zonaNombre = res.zona;
 
-            doc.autoTable({
-                head: head,
-                body: body,
-                margin: { top: 30 },
-                didDrawPage: function(data) {
-                    doc.setFontSize(16);
-                    doc.setTextColor(40);
-                    doc.text(title, data.settings.margin.left, 15);
-                    doc.setFontSize(9);
-                    doc.setTextColor(100);
-                    doc.text(cobrador, data.settings.margin.left, 22);
-                    doc.text(fecha, doc.internal.pageSize.getWidth() - data.settings.margin.right, 22, { align: 'right' });
-                },
-                styles: {
-                    fontSize: 6.5, 
-                    cellPadding: 1,
-                    overflow: 'linebreak'
-                },
-                headStyles: {
-                    fillColor: [255, 255, 255],
-                    textColor: [0, 0, 0],
-                    fontStyle: 'bold'
-                },
-                 columnStyles: {
-                    0: { cellWidth: 7 }, // #
-                    1: { cellWidth: 'auto' }, // Cliente
-                    2: { cellWidth: 20 }, // Telefono
-                    3: { cellWidth: 15 }, // Día Cobro
-                    4: { cellWidth: 16 }, // Venc. Cuota
-                    5: { cellWidth: 16 }, // Saldo
-                    6: { cellWidth: 15 }, // Frec.
-                    7: { cellWidth: 16 }, // Monto
-                    8: { cellWidth: 16 }, // Últ. Pago
-                    9: { cellWidth: 15 }  // Atraso
-                }
-            });
+                    const { jsPDF } = window.jspdf;
+                    const doc = new jsPDF();
+                    
+                    // Título
+                    doc.setFontSize(18);
+                    doc.text(`Reporte de Atrasados - Zona: ${zonaNombre}`, 14, 20);
+                    doc.setFontSize(11);
+                    doc.text("Fecha: " + new Date().toLocaleDateString(), 14, 28);
+                    
+                    // Helper para fecha
+                    const formatDate = (dateString) => {
+                        if(!dateString) return '-';
+                        const parts = dateString.split('-');
+                        return `${parts[2]}/${parts[1]}/${parts[0]}`;
+                    };
 
-            doc.output('dataurlnewwindow');
-
-        } catch (e) {
-            console.error("Error al generar el PDF:", e);
-            alert("Hubo un error al intentar generar el PDF. Revise la consola para más detalles.");
-        }
-    });
+                    // Tabla
+                    doc.autoTable({
+                        startY: 35,
+                        head: [['#', 'Cliente', 'Celular', 'Deuda Total', 'C. Atras.', 'Cuota', 'Ult. Pago', 'Días Atraso']],
+                        body: data.map((r, index) => [
+                            index + 1,
+                            r.nombre,
+                            r.telefono || '-',
+                            '$' + new Intl.NumberFormat('es-AR').format(r.total_vencido),
+                            r.cant_cuotas_vencidas,
+                            '$' + new Intl.NumberFormat('es-AR').format(r.monto_cuota),
+                            formatDate(r.ultimo_pago),
+                            r.dias_atraso + ' días'
+                        ]),
+                        theme: 'grid',
+                        styles: { fontSize: 8 },
+                        headStyles: { fillColor: [220, 53, 69] } // Rojo
+                    });
+                    
+                    // Abrir en nueva ventana
+                    doc.output('dataurlnewwindow');
+                })
+                .catch(err => {
+                    console.error(err);
+                    alert("Error al generar PDF: " + err.message);
+                })
+                .finally(() => {
+                    btnExport.innerHTML = originalText;
+                    btnExport.disabled = false;
+                });
+        });
+    }
 });
-
-function formatCurrency(value) {
-    return '$' + new Intl.NumberFormat('es-AR').format(value);
-}
 </script>
-

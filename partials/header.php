@@ -81,6 +81,12 @@ $nombre_usuario = $_SESSION['user_nombre'] ?? 'Usuario';
                         <a href="index.php?page=atrasados" class="<?= $current_page == 'atrasados' ? 'bg-gray-800 text-white shadow-sm' : 'text-gray-300 hover:bg-gray-700 hover:text-white' ?> px-3 py-2 rounded-md text-sm font-medium transition-all duration-200 transform hover:scale-105">
                             <i class="fas fa-clock mr-1"></i> Atrasados
                         </a>
+                        <a href="index.php?page=log_pagos" class="<?= $current_page == 'log_pagos' ? 'bg-indigo-900 text-indigo-200 shadow-sm border border-indigo-700' : 'text-gray-300 hover:bg-gray-700 hover:text-white' ?> px-3 py-2 rounded-md text-sm font-medium transition-all duration-200 transform hover:scale-105">
+                            <i class="fas fa-history mr-1"></i> Log
+                        </a>
+                        <a href="recon/index.php" class="text-gray-300 hover:bg-gray-700 hover:text-white px-3 py-2 rounded-md text-sm font-medium transition-all duration-200 transform hover:scale-105" target="_blank">
+                            <i class="fas fa-search mr-1"></i> Recon
+                        </a>
                         
                         <!-- ENLACE RESTRINGIDO: Solo visible para Admins -->
                         <?php if($rol_usuario === 'admin'): ?>
@@ -127,6 +133,12 @@ $nombre_usuario = $_SESSION['user_nombre'] ?? 'Usuario';
                 </a>
                 <a href="index.php?page=atrasados" class="text-gray-300 hover:bg-gray-700 hover:text-white block px-3 py-2 rounded-md text-base font-medium">
                     <i class="fas fa-clock mr-2 w-5 text-center"></i> Atrasados
+                </a>
+                <a href="index.php?page=log_pagos" class="text-indigo-300 hover:bg-gray-700 hover:text-white block px-3 py-2 rounded-md text-base font-medium">
+                    <i class="fas fa-history mr-2 w-5 text-center"></i> Log de Pagos
+                </a>
+                <a href="recon/index.php" class="text-gray-300 hover:bg-gray-700 hover:text-white block px-3 py-2 rounded-md text-base font-medium" target="_blank">
+                    <i class="fas fa-search mr-2 w-5 text-center"></i> Recon
                 </a>
                 
                 <!-- ENLACE RESTRINGIDO MÓVIL -->

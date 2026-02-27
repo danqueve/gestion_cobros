@@ -37,9 +37,10 @@ try {
         $sql_all = "SELECT 
                     c.nombre,
                     c.telefono,
-                    cr.zona,
                     cr.ultimo_pago,
+                    cr.monto_cuota,
                     SUM(cc.monto_cuota - cc.monto_pagado) AS total_vencido,
+                    COUNT(cc.id) AS cant_cuotas_vencidas,
                     DATEDIFF(CURDATE(), MIN(cc.fecha_vencimiento)) AS dias_atraso
                 FROM creditos cr
                 JOIN clientes c ON cr.cliente_id = c.id
@@ -49,7 +50,7 @@ try {
                   AND cc.fecha_vencimiento < CURDATE()
                   $where_zona
                 GROUP BY cr.id
-                ORDER BY total_vencido DESC, dias_atraso DESC";
+                ORDER BY total_vencido DESC";
         
         $stmt_all = $pdo->prepare($sql_all);
         $stmt_all->execute($params);
@@ -99,7 +100,7 @@ try {
               AND cc.fecha_vencimiento < CURDATE()
               $where_zona
             GROUP BY cr.id
-            ORDER BY total_vencido DESC, dias_atraso DESC
+            ORDER BY total_vencido DESC
             LIMIT :limit OFFSET :offset";
 
     $stmt = $pdo->prepare($sql);
@@ -339,17 +340,19 @@ document.addEventListener('DOMContentLoaded', function () {
                     // Tabla
                     doc.autoTable({
                         startY: 35,
-                        head: [['#', 'Cliente', 'Deuda Total', 'Días Atraso', 'Ult. Pago', 'Zona']],
+                        head: [['#', 'Cliente', 'Celular', 'Deuda Total', 'C. Atras.', 'Cuota', 'Ult. Pago', 'Días Atraso']],
                         body: data.map((r, index) => [
-                            index + 1, // Enumeración
-                            r.nombre, 
+                            index + 1,
+                            r.nombre,
+                            r.telefono || '-',
                             '$' + new Intl.NumberFormat('es-AR').format(r.total_vencido),
-                            r.dias_atraso + ' días',
+                            r.cant_cuotas_vencidas,
+                            '$' + new Intl.NumberFormat('es-AR').format(r.monto_cuota),
                             formatDate(r.ultimo_pago),
-                            nombresZonas[r.zona] || r.zona
+                            r.dias_atraso + ' días'
                         ]),
                         theme: 'grid',
-                        styles: { fontSize: 9 },
+                        styles: { fontSize: 8 },
                         headStyles: { fillColor: [220, 53, 69] } // Rojo
                     });
                     

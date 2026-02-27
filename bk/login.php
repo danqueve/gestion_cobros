@@ -1,55 +1,53 @@
 <?php
-// Incluye el archivo de configuración. Es lo primero que se debe hacer
-// para tener acceso a la sesión y a la conexión con la base de datos.
+// Incluir configuración (inicia sesión automáticamente si no está iniciada)
 require_once 'config.php';
 
-// Variable para almacenar mensajes de error.
-$error = '';
-
-// Si el usuario ya ha iniciado sesión (es decir, ya existe la variable de sesión),
-// no tiene sentido mostrarle el login de nuevo. Lo redirigimos a la página principal.
+// Si ya está logueado, redirigir al panel principal
 if (isset($_SESSION['user_id'])) {
     header("Location: index.php");
     exit;
 }
 
-// El código dentro de este 'if' solo se ejecuta cuando el usuario envía el formulario (método POST).
+$error = '';
+
 if ($_SERVER["REQUEST_METHOD"] == "POST") {
+    $username = trim($_POST['username']);
+    $password = $_POST['password'];
 
-    // Validar que los campos no estén vacíos.
-    if (empty($_POST['username']) || empty($_POST['password'])) {
-        $error = "Por favor, complete ambos campos.";
+    if (empty($username) || empty($password)) {
+        $error = "Por favor ingrese usuario y contraseña.";
     } else {
-        $username = $_POST['username'];
-        $password = $_POST['password'];
-
         try {
-            // Preparamos una consulta SQL segura para buscar al usuario por su nombre de usuario.
-            // Usar consultas preparadas previene inyecciones SQL.
-            $stmt = $pdo->prepare("SELECT id, nombre_usuario, password FROM usuarios WHERE nombre_usuario = ?");
+            // CORRECCIÓN: Eliminamos 'rol' y 'zonas_asignadas' de la consulta
+            // Solo seleccionamos los campos que realmente existen en tu tabla actual
+            $sql = "SELECT id, nombre_usuario, nombre_completo, password FROM usuarios WHERE nombre_usuario = ?";
+            $stmt = $pdo->prepare($sql);
             $stmt->execute([$username]);
-            
-            // Obtenemos el resultado como un array asociativo.
             $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
-            // Verificamos si se encontró un usuario y si la contraseña enviada coincide
-            // con el hash almacenado en la base de datos.
             if ($user && password_verify($password, $user['password'])) {
-                // Si la validación es exitosa:
-                // 1. Guardamos el ID y el nombre de usuario en la sesión.
+                // Login Exitoso: Guardamos datos críticos en sesión
                 $_SESSION['user_id'] = $user['id'];
-                $_SESSION['username'] = $user['nombre_usuario'];
                 
-                // 2. Redirigimos al usuario a la página principal del sistema.
+                // Usamos nombre_completo para mostrar "Hola, Juan", si no existe usamos el usuario
+                $_SESSION['user_nombre'] = !empty($user['nombre_completo']) ? $user['nombre_completo'] : $user['nombre_usuario'];
+                
+                // NOTA: Como no hay roles en la BD, no guardamos $_SESSION['rol'].
+                // El archivo config.php ya se ajustó para asumir que todos tienen permiso total (esAdmin() devuelve true).
+
+                // Regenerar ID de sesión por seguridad
+                session_regenerate_id(true);
+
+                // Redirigir al dashboard
                 header("Location: index.php");
                 exit;
             } else {
-                // Si no se encontró el usuario o la contraseña es incorrecta.
-                $error = "Nombre de usuario o contraseña incorrectos.";
+                $error = "Usuario o contraseña incorrectos.";
             }
         } catch (PDOException $e) {
-            // Si ocurre un error con la base de datos.
-            $error = "Error al consultar la base de datos: " . $e->getMessage();
+            // En producción, es mejor loguear el error y mostrar un mensaje genérico
+            error_log("Login Error: " . $e->getMessage());
+            $error = "Error de base de datos. Intente más tarde.";
         }
     }
 }
@@ -58,46 +56,78 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
 <html lang="es">
 <head>
     <meta charset="UTF-8">
-    <title>Login - Sistema de Cobros</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - Gestión de Cobros</title>
+    <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Font Awesome -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
-        body { background-color: #111827; }
+        body { background-color: #111827; color: #e2e8f0; } /* bg-gray-900 text-gray-200 */
+        .login-card { background-color: #1f2937; } /* bg-gray-800 */
+        /* Animación suave para el botón */
+        .btn-login { transition: all 0.2s ease-in-out; }
+        .btn-login:hover { transform: translateY(-1px); }
     </style>
 </head>
-<body class="flex items-center justify-center h-screen">
-    <div class="w-full max-w-md p-8 space-y-8 bg-gray-800 rounded-lg shadow-lg border border-gray-700">
-        <div class="text-center">
-            <i class="fas fa-cash-register text-blue-500 text-4xl"></i>
-            <h2 class="mt-4 text-2xl font-bold text-white">Sistema de Cobros</h2>
-        </div>
-        
-        <?php if(!empty($error)): ?>
-            <div class="bg-red-900 border border-red-700 text-red-200 px-4 py-3 rounded-md" role="alert">
-                <?= htmlspecialchars($error) ?>
+<body class="h-screen flex items-center justify-center bg-gray-900">
+    <div class="login-card p-8 rounded-xl shadow-2xl w-full max-w-sm border border-gray-700">
+        <div class="text-center mb-8">
+            <div class="bg-blue-600 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 shadow-lg">
+                <i class="fas fa-wallet text-3xl text-white"></i>
             </div>
+            <h1 class="text-2xl font-bold text-white tracking-wide">Gestión de Cobros</h1>
+            <p class="text-gray-400 text-sm mt-1">Ingrese sus credenciales para acceder</p>
+        </div>
+
+        <?php if(!empty($error)): ?>
+            <div class="bg-red-900/50 border border-red-500 text-red-200 px-4 py-3 rounded-lg mb-6 text-sm flex items-center shadow-sm">
+                <i class="fas fa-exclamation-circle mr-2 text-red-400 text-lg"></i>
+                <span><?= htmlspecialchars($error) ?></span>
+            </div>
+        <?php else: ?>
+            <?php if(isset($_GET['registered'])): ?>
+                <div class="bg-green-900/50 border border-green-500 text-green-200 px-4 py-3 rounded-lg mb-6 text-sm flex items-center shadow-sm">
+                    <i class="fas fa-check-circle mr-2 text-green-400 text-lg"></i>
+                    <span>¡Cuenta creada! Inicia sesión.</span>
+                </div>
+            <?php endif; ?>
         <?php endif; ?>
 
-        <form class="mt-8 space-y-6" action="login.php" method="POST">
-            <input type="hidden" name="remember" value="true">
-            <div class="rounded-md shadow-sm -space-y-px">
-                <div>
-                    <label for="username" class="sr-only">Usuario</label>
-                    <input id="username" name="username" type="text" required class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-blue-500 focus:border-blue-500" placeholder="Usuario (admin)">
-                </div>
-                <div class="pt-4">
-                    <label for="password" class="sr-only">Contraseña</label>
-                    <input id="password" name="password" type="password" required class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-blue-500 focus:border-blue-500" placeholder="Contraseña (admin)">
+        <form method="POST" action="login.php" autocomplete="off">
+            <div class="mb-5">
+                <label class="block text-gray-300 text-xs font-bold mb-2 uppercase tracking-wider" for="username">Usuario</label>
+                <div class="relative">
+                    <span class="absolute inset-y-0 left-0 flex items-center pl-3 text-gray-500 pointer-events-none">
+                        <i class="fas fa-user"></i>
+                    </span>
+                    <input class="w-full bg-gray-700 text-white border border-gray-600 rounded-lg py-3 pl-10 pr-3 leading-tight focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors placeholder-gray-500" 
+                           id="username" name="username" type="text" placeholder="Su usuario" required autofocus>
                 </div>
             </div>
-
-            <div>
-                <button type="submit" class="w-full py-2 px-4 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-md transition duration-300">
-                    Entrar
+            
+            <div class="mb-8">
+                <label class="block text-gray-300 text-xs font-bold mb-2 uppercase tracking-wider" for="password">Contraseña</label>
+                <div class="relative">
+                    <span class="absolute inset-y-0 left-0 flex items-center pl-3 text-gray-500 pointer-events-none">
+                        <i class="fas fa-lock"></i>
+                    </span>
+                    <input class="w-full bg-gray-700 text-white border border-gray-600 rounded-lg py-3 pl-10 pr-3 leading-tight focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors placeholder-gray-500" 
+                           id="password" name="password" type="password" placeholder="Su contraseña" required>
+                </div>
+            </div>
+            
+            <div class="flex items-center justify-between">
+                <button class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg focus:outline-none focus:shadow-outline shadow-lg btn-login flex items-center justify-center gap-2" type="submit">
+                    <span>Ingresar al Sistema</span>
+                    <i class="fas fa-arrow-right text-sm"></i>
                 </button>
             </div>
         </form>
+        
+        <div class="mt-6 text-center text-xs text-gray-500">
+            &copy; <?= date('Y') ?> Sistema de Gestión v1.0
+        </div>
     </div>
 </body>
 </html>

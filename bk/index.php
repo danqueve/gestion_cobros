@@ -3,6 +3,10 @@
 // Este archivo es el único punto de entrada a la aplicación.
 // Se encarga de la seguridad, la carga de configuración y de mostrar la vista correcta.
 
+// 0. Iniciar buffer de salida para evitar errores de "Headers already sent"
+// al hacer redirecciones desde las vistas.
+ob_start();
+
 // 1. Cargar la configuración y las funciones auxiliares.
 require_once 'config.php';
 
@@ -28,7 +32,8 @@ $allowed_pages = [
     'eliminar_cliente',
     'atrasados',
     'reporte_general',
-    'finalizados' // <-- CORRECCIÓN: Se ha añadido la página 'finalizados'
+    'finalizados',
+    'log_pagos',  // historial de pagos
 ];
 
 // 6. Cargar la vista correspondiente.
